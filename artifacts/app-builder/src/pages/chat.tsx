@@ -18,6 +18,8 @@ import {
 import { cn } from "@/lib/utils";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
+import SyntaxHighlighter from "react-syntax-highlighter";
+import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 
 interface Message {
   id: string;
@@ -154,7 +156,12 @@ function EmptyState({ onPrompt }: { onPrompt: (p: string) => void }) {
   );
 }
 
-/* ── Custom code block for ReactMarkdown ── */
+/* ── Syntax-highlighted code block ── */
+const HIGHLIGHT_STYLE = {
+  ...atomOneDark,
+  hljs: { ...atomOneDark.hljs, background: "#0d1117", fontSize: "12px", lineHeight: "1.6" },
+};
+
 function CodeBlock({ language, code }: { language: string; code: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
@@ -162,24 +169,55 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
+  const langLabel = language || "text";
   return (
-    <div className="my-2 rounded-xl overflow-hidden border border-border/50 bg-[#0d1117]">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-[#161b22] border-b border-border/40">
-        <span className="text-[10px] font-mono font-semibold text-muted-foreground/70 uppercase tracking-wider">
-          {language || "code"}
-        </span>
+    <div className="my-2.5 rounded-xl overflow-hidden border border-[#30363d] bg-[#0d1117] shadow-md">
+      <div className="flex items-center justify-between px-3.5 py-2 bg-[#161b22] border-b border-[#30363d]">
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1">
+            <div className="w-3 h-3 rounded-full bg-[#ff5f57]/70" />
+            <div className="w-3 h-3 rounded-full bg-[#febc2e]/70" />
+            <div className="w-3 h-3 rounded-full bg-[#28c840]/70" />
+          </div>
+          <span className="text-[10px] font-mono font-semibold text-muted-foreground/60 uppercase tracking-wider">
+            {langLabel}
+          </span>
+        </div>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 text-[10px] text-muted-foreground/60 hover:text-foreground transition-colors"
+          className="flex items-center gap-1 text-[10px] text-muted-foreground/50 hover:text-foreground transition-colors px-2 py-0.5 rounded-md hover:bg-secondary/40"
         >
           {copied ? <CheckCircle size={11} className="text-green-400" /> : <Copy size={11} />}
           {copied ? "Copied!" : "Copy"}
         </button>
       </div>
-      <pre className="overflow-x-auto px-4 py-3 text-[12px] font-mono text-foreground/90 leading-relaxed">
-        <code>{code}</code>
-      </pre>
+      <SyntaxHighlighter
+        language={langLabel}
+        style={HIGHLIGHT_STYLE}
+        customStyle={{ margin: 0, padding: "12px 16px", background: "#0d1117", borderRadius: 0 }}
+        showLineNumbers={code.split("\n").length > 4}
+        lineNumberStyle={{ color: "#484f58", fontSize: "11px", minWidth: "32px", paddingRight: "12px" }}
+        wrapLongLines={false}
+      >
+        {code}
+      </SyntaxHighlighter>
     </div>
+  );
+}
+
+/* ── Standalone syntax viewer (for file editor) ── */
+function SyntaxView({ code, language }: { code: string; language: string }) {
+  return (
+    <SyntaxHighlighter
+      language={language || "text"}
+      style={HIGHLIGHT_STYLE}
+      customStyle={{ margin: 0, padding: "12px 16px", background: "#0d1117", borderRadius: 0, fontSize: "12px", lineHeight: "1.6", flex: 1, height: "100%", overflow: "auto" }}
+      showLineNumbers
+      lineNumberStyle={{ color: "#484f58", fontSize: "11px", minWidth: "36px", paddingRight: "16px" }}
+      wrapLongLines={false}
+    >
+      {code}
+    </SyntaxHighlighter>
   );
 }
 
@@ -1984,43 +2022,139 @@ const MOCK_LOGS = [
 
 function RunPanel({ onClose }: { onClose: () => void }) {
   const [running, setRunning] = useState(true);
-  const [logs, setLogs] = useState(MOCK_LOGS);
+  const [history, setHistory] = useState<{ t: string; msg: string; cls: string }[]>(MOCK_LOGS);
+  const [cmd, setCmd] = useState("");
+  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+  const [histIdx, setHistIdx] = useState(-1);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const cmdInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [history]);
+
+  const SHELL_RESPONSES: Record<string, { msg: string; cls: string }[]> = {
+    "npm run dev": [
+      { msg: "> my-app@0.0.1 dev", cls: "text-muted-foreground/70" },
+      { msg: "> vite --host 0.0.0.0", cls: "text-muted-foreground/70" },
+      { msg: "  VITE v7.3.2  ready in 312 ms", cls: "text-green-400" },
+      { msg: "  ➜  Local: http://localhost:5173/", cls: "text-blue-400" },
+    ],
+    "npm run build": [
+      { msg: "> my-app@0.0.1 build", cls: "text-muted-foreground/70" },
+      { msg: "> tsc && vite build", cls: "text-muted-foreground/70" },
+      { msg: "✓ built in 2.4s", cls: "text-green-400" },
+      { msg: "dist/index.html    0.46 kB", cls: "text-muted-foreground/60" },
+      { msg: "dist/assets/index-DiwrgTda.js   142.36 kB │ gzip: 45.99 kB", cls: "text-muted-foreground/60" },
+    ],
+    "ls": [
+      { msg: "node_modules/  package.json  src/  tsconfig.json  vite.config.ts", cls: "text-foreground/80" },
+    ],
+    "ls src": [
+      { msg: "App.tsx  components/  index.css  main.tsx", cls: "text-foreground/80" },
+    ],
+    "pwd": [{ msg: "/home/user/my-app", cls: "text-foreground/80" }],
+    "node --version": [{ msg: "v22.0.0", cls: "text-green-400" }],
+    "npm --version": [{ msg: "10.8.1", cls: "text-green-400" }],
+    "clear": [],
+    "help": [
+      { msg: "Available commands:", cls: "text-yellow-400" },
+      { msg: "  npm run dev    — Start dev server", cls: "text-muted-foreground/70" },
+      { msg: "  npm run build  — Build for production", cls: "text-muted-foreground/70" },
+      { msg: "  npm install    — Install packages", cls: "text-muted-foreground/70" },
+      { msg: "  ls, pwd, clear — File system utils", cls: "text-muted-foreground/70" },
+    ],
+  };
+
+  const runCmd = (command: string) => {
+    const c = command.trim();
+    if (!c) return;
+    setCmdHistory(h => [c, ...h.slice(0, 49)]);
+    setHistIdx(-1);
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const promptLine = { t: now, msg: `$ ${c}`, cls: "text-primary/80 font-semibold" };
+
+    if (c === "clear") { setHistory([]); return; }
+
+    const responses = SHELL_RESPONSES[c];
+    if (responses) {
+      const lines = responses.map(r => ({ t: "", ...r }));
+      setHistory(h => [...h, promptLine, ...lines]);
+    } else if (c.startsWith("npm install") || c.startsWith("pnpm add") || c.startsWith("yarn add")) {
+      const pkg = c.split(" ").slice(2).join(" ") || "packages";
+      setHistory(h => [...h, promptLine, { t: now, msg: `⠦ Installing ${pkg}...`, cls: "text-yellow-400" }]);
+      setTimeout(() => {
+        setHistory(h => [...h, { t: "", msg: `✓ added 1 package`, cls: "text-green-400" }]);
+      }, 1200);
+    } else {
+      setHistory(h => [...h, promptLine, { t: now, msg: `bash: ${c}: command not found`, cls: "text-red-400" }]);
+    }
+    setCmd("");
+  };
 
   const restart = () => {
     setRunning(false);
-    setLogs([]);
-    setTimeout(() => {
-      setRunning(true);
-      setLogs(MOCK_LOGS);
-    }, 800);
+    setHistory([]);
+    setTimeout(() => { setRunning(true); setHistory(MOCK_LOGS); }, 900);
   };
 
   return (
     <motion.div initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }}
       transition={{ type: "spring", stiffness: 340, damping: 36 }}
-      className="absolute inset-0 z-50 flex flex-col bg-background">
-      <div className="flex items-center gap-2 px-4 pt-10 pb-3 border-b border-border shrink-0">
+      className="absolute inset-0 z-50 flex flex-col bg-[#0d1117]">
+      <div className="flex items-center gap-2 px-4 pt-10 pb-3 border-b border-[#30363d] shrink-0 bg-[#161b22]">
         <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-sm flex items-center gap-1 transition-colors"><ArrowLeft size={15} /> Back</button>
         <div className="flex-1" />
-        <div className={cn("w-2 h-2 rounded-full", running ? "bg-green-400" : "bg-red-400")} />
-        <span className="text-base font-semibold text-foreground">Run</span>
+        <div className={cn("w-2 h-2 rounded-full animate-pulse", running ? "bg-green-400" : "bg-red-400")} />
+        <span className="text-sm font-semibold text-foreground">Shell</span>
         <div className="flex-1" />
-        <button onClick={restart} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors"><RefreshCw size={15} /></button>
-        <button onClick={onClose} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors"><X size={18} /></button>
+        <button onClick={restart} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors" title="Restart">
+          <RefreshCw size={14} />
+        </button>
+        <button onClick={onClose} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors">
+          <X size={16} />
+        </button>
       </div>
-      <div className="flex-1 bg-[#0d1117] overflow-y-auto px-4 py-3 font-mono no-scrollbar">
+      <div className="flex-1 overflow-y-auto px-4 py-3 font-mono no-scrollbar" onClick={() => cmdInputRef.current?.focus()}>
         {!running ? (
-          <div className="flex items-center gap-2 text-muted-foreground/60 text-xs"><Loader2 size={13} className="animate-spin" /> Starting...</div>
-        ) : logs.map((l, i) => (
-          <div key={i} className="flex items-start gap-3 text-xs leading-relaxed">
-            <span className="text-muted-foreground/30 shrink-0 w-10">{l.t}</span>
-            <span className={l.cls}>{l.msg}</span>
-          </div>
-        ))}
+          <div className="flex items-center gap-2 text-muted-foreground/60 text-xs py-2"><Loader2 size={13} className="animate-spin" /> Starting shell...</div>
+        ) : (
+          <>
+            <div className="text-xs text-green-400/60 mb-3">Replit Shell — type <span className="text-yellow-400">help</span> for available commands</div>
+            {history.map((l, i) => (
+              <div key={i} className="flex items-start gap-3 text-xs leading-relaxed mb-0.5">
+                {l.t && <span className="text-muted-foreground/25 shrink-0 w-14 text-[10px] pt-0.5">{l.t}</span>}
+                <span className={l.cls} style={{ fontFamily: "monospace" }}>{l.msg}</span>
+              </div>
+            ))}
+          </>
+        )}
+        <div ref={logsEndRef} />
       </div>
-      <div className="shrink-0 border-t border-border bg-card/60 px-4 py-2 flex items-center gap-2">
-        <span className="text-xs text-muted-foreground/60">$</span>
-        <input placeholder="Enter command..." className="flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground/40" />
+      {/* Command input */}
+      <div className="shrink-0 border-t border-[#30363d] bg-[#161b22] px-4 py-2.5 flex items-center gap-2">
+        <span className="text-green-400 text-sm font-mono shrink-0">$</span>
+        <input
+          ref={cmdInputRef}
+          value={cmd}
+          onChange={e => setCmd(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === "Enter") runCmd(cmd);
+            if (e.key === "ArrowUp") {
+              e.preventDefault();
+              const idx = Math.min(histIdx + 1, cmdHistory.length - 1);
+              setHistIdx(idx);
+              setCmd(cmdHistory[idx] ?? "");
+            }
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              const idx = Math.max(histIdx - 1, -1);
+              setHistIdx(idx);
+              setCmd(idx === -1 ? "" : (cmdHistory[idx] ?? ""));
+            }
+          }}
+          placeholder="Enter command..."
+          className="flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground/30 font-mono"
+          autoFocus
+        />
       </div>
     </motion.div>
   );
@@ -2106,83 +2240,662 @@ function DeployPanel({ onClose }: { onClose: () => void }) {
 }
 
 /* ─────────────────────────────────────────────────────────
-   FILES PANEL
+   FILES PANEL — Real editor with syntax highlighting
    ───────────────────────────────────────────────────────── */
-const MOCK_FILES = [
-  { name: "src", type: "folder", children: [
-    { name: "components", type: "folder", children: [
-      { name: "Button.tsx", type: "file" },
-      { name: "Input.tsx", type: "file" },
+
+type FileNode = {
+  id: string;
+  name: string;
+  type: "file" | "folder";
+  content?: string;
+  language?: string;
+  children?: FileNode[];
+};
+
+const DEFAULT_FILES: FileNode[] = [
+  { id: "src", name: "src", type: "folder", children: [
+    { id: "src/components", name: "components", type: "folder", children: [
+      { id: "src/components/Button.tsx", name: "Button.tsx", type: "file", language: "typescript", content: `import { cn } from "@/lib/utils";
+
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: "primary" | "secondary" | "ghost";
+  size?: "sm" | "md" | "lg";
+}
+
+export function Button({ variant = "primary", size = "md", className, children, ...props }: ButtonProps) {
+  return (
+    <button
+      className={cn(
+        "inline-flex items-center justify-center rounded-xl font-medium transition-all active:scale-95",
+        variant === "primary" && "bg-primary text-primary-foreground hover:brightness-110",
+        variant === "secondary" && "bg-secondary text-foreground hover:bg-secondary/80",
+        variant === "ghost" && "hover:bg-secondary/50 text-muted-foreground",
+        size === "sm" && "px-3 py-1.5 text-xs",
+        size === "md" && "px-4 py-2 text-sm",
+        size === "lg" && "px-6 py-3 text-base",
+        className
+      )}
+      {...props}
+    >
+      {children}
+    </button>
+  );
+}` },
+      { id: "src/components/Input.tsx", name: "Input.tsx", type: "file", language: "typescript", content: `interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  label?: string;
+  error?: string;
+}
+
+export function Input({ label, error, className, ...props }: InputProps) {
+  return (
+    <div className="flex flex-col gap-1">
+      {label && <label className="text-sm font-medium text-foreground">{label}</label>}
+      <input
+        className={\`w-full px-3 py-2 bg-secondary border border-border rounded-xl text-sm outline-none
+          focus:border-primary/60 focus:ring-1 focus:ring-primary/20 transition-all
+          \${error ? "border-red-400" : ""} \${className ?? ""}\`}
+        {...props}
+      />
+      {error && <p className="text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}` },
     ]},
-    { name: "pages", type: "folder", children: [
-      { name: "index.tsx", type: "file" },
-      { name: "about.tsx", type: "file" },
-    ]},
-    { name: "App.tsx", type: "file" },
-    { name: "main.tsx", type: "file" },
+    { id: "src/App.tsx", name: "App.tsx", type: "file", language: "typescript", content: `import { useState } from "react";
+import { Button } from "./components/Button";
+import { Input } from "./components/Input";
+
+export default function App() {
+  const [count, setCount] = useState(0);
+  const [name, setName] = useState("");
+
+  return (
+    <main className="min-h-screen bg-background flex flex-col items-center justify-center gap-6 p-8">
+      <h1 className="text-3xl font-bold text-foreground">My App</h1>
+      
+      <Input
+        label="Your name"
+        placeholder="Enter your name..."
+        value={name}
+        onChange={e => setName(e.target.value)}
+      />
+      
+      {name && <p className="text-muted-foreground">Hello, {name}!</p>}
+      
+      <div className="flex items-center gap-3">
+        <Button variant="secondary" onClick={() => setCount(c => c - 1)}>−</Button>
+        <span className="text-2xl font-mono font-bold text-foreground w-12 text-center">{count}</span>
+        <Button onClick={() => setCount(c => c + 1)}>+</Button>
+      </div>
+    </main>
+  );
+}` },
+    { id: "src/main.tsx", name: "main.tsx", type: "file", language: "typescript", content: `import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./index.css";
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+);` },
+    { id: "src/index.css", name: "index.css", type: "file", language: "css", content: `@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0d1117;
+  --foreground: #e6edf3;
+  --primary: #7c3aed;
+}
+
+* { box-sizing: border-box; margin: 0; }
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}` },
   ]},
-  { name: "public", type: "folder", children: [{ name: "index.html", type: "file" }] },
-  { name: "package.json", type: "file" },
-  { name: "vite.config.ts", type: "file" },
-  { name: "tsconfig.json", type: "file" },
+  { id: "package.json", name: "package.json", type: "file", language: "json", content: `{
+  "name": "my-app",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^7.0.0"
+  }
+}` },
+  { id: "vite.config.ts", name: "vite.config.ts", type: "file", language: "typescript", content: `import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: { host: "0.0.0.0", port: 5173 },
+});` },
+  { id: "tsconfig.json", name: "tsconfig.json", type: "file", language: "json", content: `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src"]
+}` },
 ];
 
-type FileNode = { name: string; type: string; children?: FileNode[] };
+function getFileIcon(name: string) {
+  const ext = name.split(".").pop()?.toLowerCase();
+  const colors: Record<string, string> = {
+    tsx: "text-blue-400", ts: "text-blue-400",
+    jsx: "text-yellow-400", js: "text-yellow-400",
+    css: "text-purple-400", scss: "text-purple-400",
+    json: "text-yellow-300", html: "text-orange-400",
+    md: "text-gray-300", py: "text-green-400",
+    rs: "text-orange-500", go: "text-cyan-400",
+  };
+  return colors[ext ?? ""] ?? "text-muted-foreground/70";
+}
 
-function FileTree({ nodes, depth = 0 }: { nodes: FileNode[]; depth?: number }) {
-  const [open, setOpen] = useState<Record<string, boolean>>({ src: true });
+function flattenFiles(nodes: FileNode[], path = ""): FileNode[] {
+  return nodes.flatMap(n => {
+    const fullPath = path ? `${path}/${n.name}` : n.name;
+    if (n.type === "folder" && n.children) return flattenFiles(n.children, fullPath);
+    return [{ ...n, id: fullPath }];
+  });
+}
+
+function FileTreeNode({
+  node, depth, selected, onSelect, onDelete, onRename,
+}: {
+  node: FileNode; depth: number; selected: string | null;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  onRename: (id: string, newName: string) => void;
+}) {
+  const [open, setOpen] = useState(depth === 0);
+  const [ctxMenu, setCtxMenu] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameVal, setRenameVal] = useState(node.name);
+  const renameRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (renaming) renameRef.current?.focus(); }, [renaming]);
+
   return (
     <div>
-      {nodes.map(node => (
-        <div key={node.name}>
-          <button
-            onClick={() => node.type === "folder" && setOpen(v => ({ ...v, [node.name]: !v[node.name] }))}
-            className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-secondary/30 rounded-lg transition-colors text-left"
-            style={{ paddingLeft: `${12 + depth * 16}px` }}
-          >
-            {node.type === "folder" ? (
-              <ChevronRight size={13} className={cn("text-muted-foreground/60 transition-transform shrink-0", open[node.name] && "rotate-90")} />
-            ) : (
-              <div className="w-3.5 shrink-0" />
-            )}
-            {node.type === "folder" ? (
-              <Folder size={13} className="text-yellow-400/80 shrink-0" />
-            ) : (
-              <FileText size={13} className="text-blue-400/80 shrink-0" />
-            )}
-            <span className="text-xs text-foreground truncate">{node.name}</span>
-          </button>
-          {node.type === "folder" && open[node.name] && node.children && (
-            <FileTree nodes={node.children} depth={depth + 1} />
+      <div className="relative group">
+        <button
+          onClick={() => node.type === "folder" ? setOpen(v => !v) : onSelect(node.id)}
+          onContextMenu={e => { e.preventDefault(); setCtxMenu(true); }}
+          className={cn(
+            "w-full flex items-center gap-1.5 py-1 pr-2 rounded-md transition-colors text-left",
+            selected === node.id ? "bg-primary/20 text-primary" : "hover:bg-secondary/30 text-foreground/80"
           )}
-        </div>
+          style={{ paddingLeft: `${8 + depth * 14}px` }}
+        >
+          {node.type === "folder" ? (
+            <ChevronRight size={12} className={cn("text-muted-foreground/50 transition-transform shrink-0", open && "rotate-90")} />
+          ) : <div className="w-3 shrink-0" />}
+          {node.type === "folder"
+            ? <Folder size={13} className={cn("shrink-0", open ? "text-blue-400" : "text-yellow-400/80")} />
+            : <FileText size={13} className={cn("shrink-0", getFileIcon(node.name))} />
+          }
+          {renaming ? (
+            <input
+              ref={renameRef}
+              value={renameVal}
+              onChange={e => setRenameVal(e.target.value)}
+              onBlur={() => { onRename(node.id, renameVal); setRenaming(false); }}
+              onKeyDown={e => { if (e.key === "Enter") { onRename(node.id, renameVal); setRenaming(false); } if (e.key === "Escape") setRenaming(false); }}
+              onClick={e => e.stopPropagation()}
+              className="flex-1 bg-secondary border border-primary/40 rounded px-1 text-xs text-foreground outline-none"
+            />
+          ) : (
+            <span className="text-xs truncate flex-1">{node.name}</span>
+          )}
+        </button>
+        {/* Context menu */}
+        <AnimatePresence>
+          {ctxMenu && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setCtxMenu(false)} />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.92 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.92 }}
+                className="absolute left-8 top-0 z-50 w-36 bg-card border border-border rounded-xl shadow-xl overflow-hidden"
+              >
+                {[
+                  { label: "Rename", icon: <Edit3 size={12} />, action: () => { setRenaming(true); setCtxMenu(false); } },
+                  { label: "Delete", icon: <Trash2 size={12} />, action: () => { onDelete(node.id); setCtxMenu(false); }, danger: true },
+                ].map(item => (
+                  <button key={item.label} onClick={item.action}
+                    className={cn("w-full flex items-center gap-2 px-3 py-2.5 text-xs hover:bg-secondary/50 transition-colors text-left",
+                      item.danger ? "text-red-400" : "text-foreground")}
+                  >
+                    <span className={item.danger ? "text-red-400" : "text-muted-foreground"}>{item.icon}</span>
+                    {item.label}
+                  </button>
+                ))}
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+      </div>
+      {node.type === "folder" && open && node.children?.map(child => (
+        <FileTreeNode key={child.id} node={child} depth={depth + 1} selected={selected} onSelect={onSelect} onDelete={onDelete} onRename={onRename} />
       ))}
     </div>
   );
 }
 
 function FilesPanel({ onClose }: { onClose: () => void }) {
+  const [files, setFiles] = useState<FileNode[]>(DEFAULT_FILES);
+  const [openTabs, setOpenTabs] = useState<string[]>(["src/App.tsx"]);
+  const [activeTab, setActiveTab] = useState<string>("src/App.tsx");
+  const [editMode, setEditMode] = useState(false);
   const [search, setSearch] = useState("");
+  const [showSearch, setShowSearch] = useState(false);
+  const [newFileName, setNewFileName] = useState("");
+  const [showNewFile, setShowNewFile] = useState(false);
+  const [savedToast, setSavedToast] = useState(false);
+
+  const allFiles = flattenFiles(files);
+  const activeFile = allFiles.find(f => f.id === activeTab);
+
+  const openFile = (id: string) => {
+    if (!openTabs.includes(id)) setOpenTabs(prev => [...prev, id]);
+    setActiveTab(id);
+    setShowSearch(false);
+  };
+
+  const closeTab = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const remaining = openTabs.filter(t => t !== id);
+    setOpenTabs(remaining);
+    if (activeTab === id) setActiveTab(remaining[remaining.length - 1] ?? "");
+  };
+
+  const updateFileContent = (id: string, content: string) => {
+    const update = (nodes: FileNode[]): FileNode[] => nodes.map(n => ({
+      ...n,
+      content: n.id === id ? content : n.content,
+      children: n.children ? update(n.children) : undefined,
+    }));
+    setFiles(update);
+  };
+
+  const deleteFile = (id: string) => {
+    const remove = (nodes: FileNode[]): FileNode[] =>
+      nodes.filter(n => n.id !== id).map(n => ({ ...n, children: n.children ? remove(n.children) : undefined }));
+    setFiles(remove);
+    setOpenTabs(prev => prev.filter(t => t !== id));
+    if (activeTab === id) setActiveTab("");
+  };
+
+  const renameFile = (id: string, newName: string) => {
+    const rename = (nodes: FileNode[]): FileNode[] => nodes.map(n => ({
+      ...n,
+      name: n.id === id ? newName : n.name,
+      id: n.id === id ? id.replace(/[^/]+$/, newName) : n.id,
+      children: n.children ? rename(n.children) : undefined,
+    }));
+    setFiles(rename);
+  };
+
+  const createFile = () => {
+    if (!newFileName.trim()) return;
+    const newFile: FileNode = {
+      id: `src/${newFileName}`,
+      name: newFileName,
+      type: "file",
+      language: getFileLanguage(newFileName),
+      content: "",
+    };
+    setFiles(prev => prev.map(n => n.id === "src"
+      ? { ...n, children: [...(n.children ?? []), newFile] }
+      : n
+    ));
+    openFile(newFile.id);
+    setNewFileName("");
+    setShowNewFile(false);
+  };
+
+  const handleSave = () => {
+    setSavedToast(true);
+    setTimeout(() => setSavedToast(false), 1500);
+    setEditMode(false);
+  };
+
+  const filteredFiles = search
+    ? allFiles.filter(f => f.name.toLowerCase().includes(search.toLowerCase()))
+    : [];
+
   return (
     <motion.div initial={{ x: "-100%" }} animate={{ x: 0 }} exit={{ x: "-100%" }}
+      transition={{ type: "spring", stiffness: 340, damping: 36 }}
+      className="absolute inset-0 z-50 flex flex-col bg-[#0d1117]">
+
+      {/* Header */}
+      <div className="flex items-center gap-1 px-3 pt-10 pb-2 border-b border-[#30363d] shrink-0">
+        <button onClick={onClose} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors">
+          <ArrowLeft size={16} />
+        </button>
+        <div className="flex-1" />
+        <span className="text-sm font-semibold text-foreground">Files</span>
+        <div className="flex-1" />
+        <button onClick={() => setShowSearch(v => !v)} className={cn("w-8 h-8 flex items-center justify-center rounded-lg hover:bg-secondary/60 transition-colors", showSearch ? "text-primary" : "text-muted-foreground hover:text-foreground")}>
+          <Search size={15} />
+        </button>
+        <button onClick={() => setShowNewFile(v => !v)} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors">
+          <Plus size={16} />
+        </button>
+        <button onClick={onClose} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors">
+          <X size={16} />
+        </button>
+      </div>
+
+      {/* New file input */}
+      <AnimatePresence>
+        {showNewFile && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="px-3 py-2 border-b border-[#30363d] overflow-hidden shrink-0">
+            <div className="flex gap-2">
+              <input
+                autoFocus
+                value={newFileName}
+                onChange={e => setNewFileName(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") createFile(); if (e.key === "Escape") setShowNewFile(false); }}
+                placeholder="filename.tsx"
+                className="flex-1 bg-secondary/40 border border-border/50 rounded-lg px-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-primary/50"
+              />
+              <button onClick={createFile} className="px-3 py-1.5 bg-primary/20 border border-primary/30 rounded-lg text-xs text-primary font-medium hover:bg-primary/30 transition-colors">
+                Create
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Search results */}
+      <AnimatePresence>
+        {showSearch && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden shrink-0 border-b border-[#30363d]">
+            <div className="px-3 py-2 flex items-center gap-2 bg-secondary/20">
+              <Search size={13} className="text-muted-foreground/60 shrink-0" />
+              <input autoFocus value={search} onChange={e => setSearch(e.target.value)} placeholder="Search files..." className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/50 outline-none" />
+              {search && <button onClick={() => setSearch("")}><X size={12} className="text-muted-foreground" /></button>}
+            </div>
+            {search && (
+              <div className="max-h-48 overflow-y-auto">
+                {filteredFiles.length === 0
+                  ? <p className="px-4 py-3 text-xs text-muted-foreground/60">No files found</p>
+                  : filteredFiles.map(f => (
+                    <button key={f.id} onClick={() => openFile(f.id)} className="w-full flex items-center gap-2 px-4 py-2 hover:bg-secondary/30 transition-colors text-left">
+                      <FileText size={12} className={getFileIcon(f.name)} />
+                      <span className="text-xs text-foreground truncate">{f.name}</span>
+                      <span className="text-[10px] text-muted-foreground/50 ml-auto">{f.id}</span>
+                    </button>
+                  ))
+                }
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Main area: tree + editor */}
+      <div className="flex flex-1 min-h-0">
+        {/* File tree */}
+        <div className="w-44 shrink-0 border-r border-[#30363d] overflow-y-auto py-2 no-scrollbar bg-[#0d1117]">
+          {files.map(node => (
+            <FileTreeNode key={node.id} node={node} depth={0} selected={activeTab} onSelect={openFile} onDelete={deleteFile} onRename={renameFile} />
+          ))}
+        </div>
+
+        {/* Editor area */}
+        <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          {/* Tabs */}
+          <div className="flex items-center gap-0 overflow-x-auto no-scrollbar border-b border-[#30363d] bg-[#161b22] shrink-0">
+            {openTabs.map(tabId => {
+              const file = allFiles.find(f => f.id === tabId);
+              if (!file) return null;
+              return (
+                <button
+                  key={tabId}
+                  onClick={() => setActiveTab(tabId)}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 py-2 text-xs shrink-0 border-r border-[#30363d] transition-colors group",
+                    activeTab === tabId ? "bg-[#0d1117] text-foreground border-t-2 border-t-primary -mt-px" : "text-muted-foreground/60 hover:text-foreground hover:bg-[#0d1117]/50"
+                  )}
+                >
+                  <FileText size={11} className={getFileIcon(file.name)} />
+                  <span className="max-w-[80px] truncate">{file.name}</span>
+                  <span onClick={e => closeTab(tabId, e)} className="opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all ml-0.5">
+                    <X size={10} />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Editor / viewer */}
+          {activeFile ? (
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              {/* Toolbar */}
+              <div className="flex items-center justify-between px-3 py-1.5 bg-[#161b22] border-b border-[#30363d] shrink-0">
+                <span className="text-[10px] text-muted-foreground/50 font-mono truncate">{activeFile.id}</span>
+                <div className="flex items-center gap-1">
+                  {savedToast && (
+                    <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-[10px] text-green-400 mr-1">Saved!</motion.span>
+                  )}
+                  <button
+                    onClick={() => editMode ? handleSave() : setEditMode(true)}
+                    className={cn("flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors",
+                      editMode ? "bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30" : "bg-secondary/40 text-muted-foreground hover:text-foreground border border-border/30"
+                    )}
+                  >
+                    {editMode ? <><Save size={10} /> Save</> : <><Edit3 size={10} /> Edit</>}
+                  </button>
+                </div>
+              </div>
+              {/* Content */}
+              <div className="flex-1 overflow-auto min-h-0">
+                {editMode ? (
+                  <textarea
+                    value={activeFile.content ?? ""}
+                    onChange={e => updateFileContent(activeFile.id, e.target.value)}
+                    className="w-full h-full bg-[#0d1117] text-[12px] font-mono text-foreground/90 leading-relaxed p-4 outline-none resize-none"
+                    spellCheck={false}
+                  />
+                ) : (
+                  <SyntaxView code={activeFile.content ?? ""} language={activeFile.language ?? getFileLanguage(activeFile.name)} />
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex items-center justify-center flex-col gap-3 text-center px-6">
+              <Folder size={36} className="text-muted-foreground/20" />
+              <p className="text-sm text-muted-foreground/50">Select a file to view or edit it</p>
+              <p className="text-xs text-muted-foreground/30">Long-press or right-click for options</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────
+   PACKAGES PANEL
+   ───────────────────────────────────────────────────────── */
+const POPULAR_PACKAGES = [
+  { name: "react-router-dom", version: "^7.0.0", description: "Declarative routing for React", category: "Routing", color: "text-red-400" },
+  { name: "zustand", version: "^5.0.0", description: "Simple scalable state management", category: "State", color: "text-orange-400" },
+  { name: "@tanstack/react-query", version: "^5.0.0", description: "Async state management & data fetching", category: "Data", color: "text-yellow-400" },
+  { name: "framer-motion", version: "^12.0.0", description: "Production-ready animation library", category: "Animation", color: "text-purple-400" },
+  { name: "axios", version: "^1.7.0", description: "Promise-based HTTP client", category: "Network", color: "text-blue-400" },
+  { name: "zod", version: "^3.25.0", description: "TypeScript-first schema validation", category: "Validation", color: "text-green-400" },
+  { name: "lucide-react", version: "^0.45.0", description: "Beautiful & consistent icons", category: "UI", color: "text-cyan-400" },
+  { name: "clsx", version: "^2.1.0", description: "Utility for constructing className strings", category: "Utils", color: "text-gray-400" },
+  { name: "date-fns", version: "^4.0.0", description: "Modern JavaScript date utility library", category: "Utils", color: "text-teal-400" },
+  { name: "react-hook-form", version: "^7.0.0", description: "Performant forms with easy validation", category: "Forms", color: "text-pink-400" },
+  { name: "recharts", version: "^2.0.0", description: "Composable charting library for React", category: "Charts", color: "text-indigo-400" },
+  { name: "socket.io-client", version: "^4.0.0", description: "Real-time bidirectional event-based communication", category: "Network", color: "text-amber-400" },
+];
+
+const PKG_CATEGORIES = ["All", "Routing", "State", "Data", "Animation", "Network", "Validation", "UI", "Utils", "Forms", "Charts"];
+
+function PackagesPanel({ onClose }: { onClose: () => void }) {
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState("All");
+  const [installed, setInstalled] = useState<Set<string>>(new Set(["framer-motion", "lucide-react", "zod", "clsx"]));
+  const [installing, setInstalling] = useState<Set<string>>(new Set());
+  const [customPkg, setCustomPkg] = useState("");
+
+  const filteredPkgs = POPULAR_PACKAGES.filter(p => {
+    const matchesSearch = !search || p.name.includes(search.toLowerCase()) || p.description.toLowerCase().includes(search.toLowerCase());
+    const matchesCat = activeCategory === "All" || p.category === activeCategory;
+    return matchesSearch && matchesCat;
+  });
+
+  const handleInstall = async (name: string) => {
+    if (installed.has(name)) {
+      setInstalled(prev => { const s = new Set(prev); s.delete(name); return s; });
+      return;
+    }
+    setInstalling(prev => new Set(prev).add(name));
+    await new Promise(r => setTimeout(r, 1200 + Math.random() * 600));
+    setInstalling(prev => { const s = new Set(prev); s.delete(name); return s; });
+    setInstalled(prev => new Set(prev).add(name));
+  };
+
+  const handleInstallCustom = async () => {
+    if (!customPkg.trim()) return;
+    await handleInstall(customPkg.trim());
+    setCustomPkg("");
+  };
+
+  return (
+    <motion.div initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }}
       transition={{ type: "spring", stiffness: 340, damping: 36 }}
       className="absolute inset-0 z-50 flex flex-col bg-background">
       <div className="flex items-center gap-2 px-4 pt-10 pb-3 border-b border-border shrink-0">
         <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-sm flex items-center gap-1 transition-colors"><ArrowLeft size={15} /> Back</button>
         <div className="flex-1" />
-        <Folder size={17} className="text-yellow-400" />
-        <span className="text-base font-semibold text-foreground">Files</span>
+        <Package size={16} className="text-blue-400" />
+        <span className="text-base font-semibold text-foreground">Packages</span>
         <div className="flex-1" />
         <button onClick={onClose} className="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-lg hover:bg-secondary/60 transition-colors"><X size={18} /></button>
       </div>
-      <div className="px-4 py-2 border-b border-border/40 shrink-0">
-        <div className="flex items-center gap-2 bg-secondary/30 rounded-lg px-3 h-8 border border-border/30">
-          <Search size={13} className="text-muted-foreground/60 shrink-0" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search files..." className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/50 outline-none" />
+
+      {/* Search */}
+      <div className="px-4 py-2 border-b border-border/40 space-y-2 shrink-0">
+        <div className="flex gap-2">
+          <div className="flex-1 flex items-center gap-2 bg-secondary/30 rounded-lg px-3 h-9 border border-border/30">
+            <Search size={13} className="text-muted-foreground/60 shrink-0" />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search packages..." className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/50 outline-none" />
+          </div>
+        </div>
+        {/* Custom package install */}
+        <div className="flex gap-2">
+          <input
+            value={customPkg}
+            onChange={e => setCustomPkg(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleInstallCustom()}
+            placeholder="npm package name..."
+            className="flex-1 bg-secondary/20 border border-border/40 rounded-lg px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-primary/50"
+          />
+          <button
+            onClick={handleInstallCustom}
+            disabled={!customPkg.trim()}
+            className="px-3 py-2 bg-primary/20 border border-primary/30 rounded-lg text-xs text-primary font-medium hover:bg-primary/30 transition-colors disabled:opacity-40"
+          >
+            Install
+          </button>
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto py-2 no-scrollbar">
-        <FileTree nodes={MOCK_FILES} />
+
+      {/* Category tabs */}
+      <div className="flex gap-1 px-4 py-2 overflow-x-auto no-scrollbar border-b border-border/30 shrink-0">
+        {PKG_CATEGORIES.map(cat => (
+          <button
+            key={cat}
+            onClick={() => setActiveCategory(cat)}
+            className={cn(
+              "shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors",
+              activeCategory === cat ? "bg-primary/20 text-primary border border-primary/30" : "bg-secondary/30 text-muted-foreground hover:text-foreground border border-border/20"
+            )}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+
+      {/* Installed count */}
+      {installed.size > 0 && (
+        <div className="px-4 py-1.5 bg-green-500/5 border-b border-green-500/10 shrink-0">
+          <p className="text-[10px] text-green-400/70">{installed.size} package{installed.size !== 1 ? "s" : ""} installed</p>
+        </div>
+      )}
+
+      {/* Package list */}
+      <div className="flex-1 overflow-y-auto py-2 px-3 space-y-1.5 no-scrollbar">
+        {filteredPkgs.map(pkg => {
+          const isInstalled = installed.has(pkg.name);
+          const isInstalling = installing.has(pkg.name);
+          return (
+            <motion.div key={pkg.name} layout className={cn(
+              "flex items-start gap-3 p-3 rounded-xl border transition-colors",
+              isInstalled ? "bg-green-500/5 border-green-500/20" : "bg-card/50 border-border/40 hover:bg-card/80"
+            )}>
+              <div className="w-8 h-8 rounded-lg bg-secondary/50 flex items-center justify-center shrink-0">
+                <Package size={14} className={pkg.color} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-foreground font-mono">{pkg.name}</span>
+                  <span className="text-[9px] text-muted-foreground/50 font-mono">{pkg.version}</span>
+                  <span className={cn("text-[9px] px-1.5 py-0.5 rounded-full border ml-auto", isInstalled ? "bg-green-500/10 border-green-400/30 text-green-400" : "bg-secondary/30 border-border/30 text-muted-foreground/60")}>
+                    {pkg.category}
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground/60 mt-0.5 leading-relaxed">{pkg.description}</p>
+              </div>
+              <button
+                onClick={() => handleInstall(pkg.name)}
+                disabled={isInstalling}
+                className={cn(
+                  "shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all",
+                  isInstalling ? "bg-yellow-400/10 border border-yellow-400/30 text-yellow-400" :
+                  isInstalled ? "bg-green-500/10 border border-green-400/30 text-green-400 hover:bg-red-500/10 hover:border-red-400/30 hover:text-red-400" :
+                  "bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20"
+                )}
+              >
+                {isInstalling ? <Loader2 size={12} className="animate-spin" /> :
+                 isInstalled ? <CheckCircle size={12} /> : <Plus size={12} />}
+              </button>
+            </motion.div>
+          );
+        })}
       </div>
     </motion.div>
   );
@@ -2551,6 +3264,7 @@ export default function Chat() {
   const [showRun, setShowRun] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
   const [showWebview, setShowWebview] = useState(false);
+  const [showPackages, setShowPackages] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [shareToast, setShareToast] = useState(false);
   const [attachments, setAttachments] = useState<{ name: string; type: string; content: string; size: number }[]>([]);
@@ -3385,17 +4099,17 @@ export default function Chat() {
             <Globe size={19} />
           </motion.button>
 
-          {/* New Tab */}
-          <motion.button whileTap={{ scale: 0.88 }} onClick={() => setShowFiles(true)} className="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-lg transition-colors" data-testid="toolbar-new-tab" title="Files">
-            <Plus size={19} />
-          </motion.button>
-
           {/* Files */}
           <motion.button whileTap={{ scale: 0.88 }} onClick={() => setShowFiles(true)} className="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-lg transition-colors" data-testid="toolbar-files" title="Files">
             <AlignJustify size={19} />
           </motion.button>
 
-          {/* Split */}
+          {/* Packages */}
+          <motion.button whileTap={{ scale: 0.88 }} onClick={() => setShowPackages(true)} className="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-blue-400 hover:bg-secondary/50 rounded-lg transition-colors" data-testid="toolbar-packages" title="Packages">
+            <Package size={19} />
+          </motion.button>
+
+          {/* Webview */}
           <motion.button whileTap={{ scale: 0.88 }} onClick={() => setShowWebview(true)} className="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded-lg transition-colors" data-testid="toolbar-split" title="Webview">
             <LayoutPanelLeft size={19} />
           </motion.button>
@@ -3456,6 +4170,11 @@ export default function Chat() {
       {/* ── Webview Panel ── */}
       <AnimatePresence>
         {showWebview && <WebviewPanel onClose={() => setShowWebview(false)} />}
+      </AnimatePresence>
+
+      {/* ── Packages Panel ── */}
+      <AnimatePresence>
+        {showPackages && <PackagesPanel onClose={() => setShowPackages(false)} />}
       </AnimatePresence>
     </motion.div>
   );
