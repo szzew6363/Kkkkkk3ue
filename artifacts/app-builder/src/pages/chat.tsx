@@ -85,6 +85,28 @@ function AgentDots({ size = 18, className = "" }: { size?: number; className?: s
   return <AgentIcon size={size} className={className} />;
 }
 
+/* ── File helpers ── */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const FILE_LANG_MAP: Record<string, string> = {
+  ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx",
+  py: "python", rs: "rust", go: "go", java: "java", cpp: "cpp",
+  c: "c", cs: "csharp", rb: "ruby", php: "php", swift: "swift",
+  kt: "kotlin", html: "html", css: "css", scss: "scss",
+  json: "json", yaml: "yaml", yml: "yaml", toml: "toml",
+  md: "markdown", sql: "sql", sh: "bash", bash: "bash",
+  txt: "text", xml: "xml", graphql: "graphql",
+};
+
+function getFileLanguage(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  return FILE_LANG_MAP[ext] ?? "text";
+}
+
 /* ── Quick starter prompts (empty state) ── */
 const QUICK_STARTERS = [
   { icon: <Globe size={14} />, label: "Landing page", prompt: "Build a modern SaaS landing page with hero, features, pricing, and FAQ sections" },
@@ -2531,7 +2553,7 @@ export default function Chat() {
   const [showWebview, setShowWebview] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [shareToast, setShareToast] = useState(false);
-  const [attachments, setAttachments] = useState<{ name: string; type: string }[]>([]);
+  const [attachments, setAttachments] = useState<{ name: string; type: string; content: string; size: number }[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2728,15 +2750,47 @@ export default function Chat() {
 
   const handleSubmit = async (overrideContent?: string) => {
     const rawContent = overrideContent ?? input.trim();
-    if (!rawContent || isThinking) return;
-    // Clear input and attachments
+    if ((!rawContent && attachments.length === 0) || isThinking) return;
+    // Snapshot attachments then clear
+    const currentAttachments = [...attachments];
     if (!overrideContent) setInput("");
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
-    const content = planEnabled ? `[PLAN MODE] ${rawContent}` : rawContent;
+
+    // Build file context block to append to the message
+    let fileContext = "";
+    if (currentAttachments.length > 0) {
+      const parts = currentAttachments
+        .filter(a => a.content)
+        .map(a => {
+          const isImage = a.type.startsWith("image/");
+          if (isImage) {
+            // For images, just mention the filename — the model can't see base64 without vision
+            return `[Attached image: ${a.name} (${formatBytes(a.size)})]`;
+          }
+          const MAX_CHARS = 12000;
+          const truncated = a.content.length > MAX_CHARS
+            ? a.content.slice(0, MAX_CHARS) + `\n... [truncated, ${a.content.length - MAX_CHARS} more chars]`
+            : a.content;
+          return `\`\`\`${getFileLanguage(a.name)}\n// File: ${a.name}\n${truncated}\n\`\`\``;
+        });
+      if (parts.length > 0) {
+        fileContext = "\n\n---\n**Attached files:**\n\n" + parts.join("\n\n");
+      }
+    }
+
+    const baseContent = rawContent || (currentAttachments.length > 0 ? `Please analyze the attached file${currentAttachments.length > 1 ? "s" : ""}.` : "");
+    const contentWithFiles = baseContent + fileContext;
+    const content = planEnabled ? `[PLAN MODE] ${contentWithFiles}` : contentWithFiles;
+
+    // Display message — show the user's text + attachment names (not the full file dump)
+    const displayContent = planEnabled
+      ? `[PLAN MODE] ${baseContent}${currentAttachments.length > 0 ? `\n📎 ${currentAttachments.map(a => a.name).join(", ")}` : ""}`
+      : `${baseContent}${currentAttachments.length > 0 ? `\n📎 ${currentAttachments.map(a => a.name).join(", ")}` : ""}`;
+
     const now = new Date();
     const userMsgId = `user-${Date.now()}`;
-    setMessages((prev) => [...prev, { id: userMsgId, role: "user", content, timestamp: now }]);
+    setMessages((prev) => [...prev, { id: userMsgId, role: "user", content: displayContent, timestamp: now }]);
     if (!conversationId) { await startConversation(content); }
     else { await sendMessage(content, conversationId); }
   };
@@ -2763,10 +2817,33 @@ export default function Chat() {
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const readFileAsText = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target?.result as string ?? "");
+      reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+      // Images → base64 data URL; text files → plain text
+      if (file.type.startsWith("image/")) {
+        reader.readAsDataURL(file);
+      } else {
+        reader.readAsText(file);
+      }
+    });
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    setAttachments(prev => [...prev, ...files.map(f => ({ name: f.name, type: f.type }))]);
     e.target.value = "";
+    const loaded = await Promise.all(
+      files.map(async (f) => {
+        try {
+          const content = await readFileAsText(f);
+          return { name: f.name, type: f.type, content, size: f.size };
+        } catch {
+          return { name: f.name, type: f.type, content: "", size: f.size };
+        }
+      })
+    );
+    setAttachments(prev => [...prev, ...loaded]);
   };
 
   return (
@@ -3141,15 +3218,40 @@ export default function Chat() {
                 exit={{ opacity: 0, height: 0 }}
                 className="flex flex-wrap gap-1.5"
               >
-                {attachments.map((att, i) => (
-                  <span key={i} className="inline-flex items-center gap-1 px-2.5 py-1 bg-secondary/50 border border-border/50 rounded-full text-xs text-foreground/80">
-                    <Paperclip size={10} className="text-muted-foreground" />
-                    <span className="truncate max-w-[100px]">{att.name}</span>
-                    <button onClick={() => setAttachments(prev => prev.filter((_, j) => j !== i))} className="text-muted-foreground/60 hover:text-red-400 transition-colors ml-0.5">
-                      <X size={10} />
-                    </button>
-                  </span>
-                ))}
+                {attachments.map((att, i) => {
+                  const isImage = att.type.startsWith("image/");
+                  const langColor: Record<string, string> = {
+                    typescript: "text-blue-400", tsx: "text-blue-400",
+                    javascript: "text-yellow-400", jsx: "text-yellow-400",
+                    python: "text-green-400", rust: "text-orange-400",
+                    html: "text-orange-300", css: "text-purple-400",
+                    json: "text-gray-300", markdown: "text-gray-400",
+                  };
+                  const lang = getFileLanguage(att.name);
+                  const dotColor = langColor[lang] ?? "text-muted-foreground";
+                  return (
+                    <motion.span
+                      key={i}
+                      initial={{ opacity: 0, scale: 0.85 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.85 }}
+                      className="inline-flex items-center gap-1.5 pl-2 pr-1.5 py-1 bg-secondary/60 border border-border/60 rounded-lg text-xs text-foreground/80 max-w-[160px]"
+                    >
+                      {isImage
+                        ? <Image size={11} className="text-purple-400 shrink-0" />
+                        : <span className={cn("w-2 h-2 rounded-full bg-current shrink-0", dotColor)} />
+                      }
+                      <span className="truncate font-mono font-medium">{att.name}</span>
+                      <span className="text-muted-foreground/50 shrink-0 text-[10px]">{formatBytes(att.size)}</span>
+                      <button
+                        onClick={() => setAttachments(prev => prev.filter((_, j) => j !== i))}
+                        className="text-muted-foreground/50 hover:text-red-400 transition-colors ml-0.5 shrink-0"
+                      >
+                        <X size={10} />
+                      </button>
+                    </motion.span>
+                  );
+                })}
               </motion.div>
             )}
           </AnimatePresence>
